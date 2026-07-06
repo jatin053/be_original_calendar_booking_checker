@@ -286,6 +286,8 @@ function combineResults(array $files): array
         'all_bookings' => [],
         'checked_bookings' => [],
         'already_exists' => [],
+        'cancelled' => [],
+        'cancelled_count' => 0,
     ];
 
     foreach ($files as $file) {
@@ -315,6 +317,7 @@ function combineResults(array $files): array
             'status_skipped' => (int) ($response['status_skipped'] ?? 0),
             'already_exists_skip' => (int) ($response['already_exists_skip'] ?? 0),
             'missing_printed' => (int) ($response['missing_printed'] ?? 0),
+            'cancelled_count' => count($response['cancelled'] ?? []),
         ];
 
         $combined['files'][] = $fileSummary;
@@ -324,6 +327,7 @@ function combineResults(array $files): array
         $combined['status_skipped'] += $fileSummary['status_skipped'];
         $combined['already_exists_skip'] += $fileSummary['already_exists_skip'];
         $combined['missing_printed'] += $fileSummary['missing_printed'];
+        $combined['cancelled_count'] += $fileSummary['cancelled_count'];
 
         foreach (($response['calendar_ids_checked'] ?? []) as $calendarId) {
             $combined['calendar_ids_checked'][$calendarId] = true;
@@ -347,6 +351,11 @@ function combineResults(array $files): array
         foreach (($response['missing'] ?? []) as $booking) {
             $booking['_csv_name'] = $fileSummary['name'];
             $combined['missing'][] = $booking;
+        }
+
+        foreach (($response['cancelled'] ?? []) as $booking) {
+            $booking['_csv_name'] = $fileSummary['name'];
+            $combined['cancelled'][] = $booking;
         }
     }
 
@@ -518,6 +527,8 @@ if ($resultData === null) {
         'calendar_ids_checked' => [],
         'all_bookings' => [],
         'checked_bookings' => [],
+        'cancelled' => [],
+        'cancelled_count' => 0,
     ];
 }
 
@@ -782,7 +793,7 @@ $fileLabel = $fileCount === 1 ? ($resultData['files'][0]['name'] ?? 'Report.csv'
         .stat-val { font-size: 2rem; font-weight: 700; margin-bottom: 0.25rem; }
         .stat-label { font-size: 0.85rem; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.05em; }
         .stat-subtext { color: var(--text-secondary); font-size: 0.78rem; margin-top: 0.45rem; }
-        .stat-blue { color: var(--accent-primary); } .stat-orange { color: var(--warning-color); } .stat-red { color: var(--danger-color); } .stat-green { color: var(--success-color); }
+        .stat-blue { color: var(--accent-primary); } .stat-orange { color: var(--warning-color); } .stat-red { color: var(--danger-color); } .stat-green { color: var(--success-color); } .stat-purple { color: #a855f7; }
         .file-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 1rem; margin-bottom: 2rem; }
         .file-section-title { font-size: 1.1rem; margin: 0 0 1rem; color: var(--text-primary); }
         .file-summary strong { display: block; margin-bottom: 0.5rem; overflow-wrap: anywhere; }
@@ -798,6 +809,8 @@ $fileLabel = $fileCount === 1 ? ($resultData['files'][0]['name'] ?? 'Report.csv'
         .booking-card { background: rgba(255, 255, 255, 0.02); border: 1px solid var(--border-color); border-radius: 12px; padding: 1.25rem; display: flex; flex-direction: column; justify-content: space-between; transition: all 0.2s ease; position: relative; overflow: hidden; animation: cardEntrance 0.4s ease-out; animation-fill-mode: both; }
         .booking-card:hover { transform: translateY(-3px); border-color: rgba(99, 102, 241, 0.25); background: rgba(255, 255, 255, 0.04); box-shadow: 0 4px 20px 0 rgba(0, 0, 0, 0.2); }
         .booking-card::before { content: ''; position: absolute; top: 0; left: 0; width: 4px; height: 100%; background: var(--danger-color); }
+        .booking-card.cancelled::before { background: #a855f7; }
+        .booking-card.cancelled:hover { border-color: rgba(168, 85, 247, 0.35); }
         .card-header { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 0.75rem; gap: 0.75rem; }
         .traveler-name { font-weight: 600; font-size: 1.1rem; color: #ffffff; margin-bottom: 0.15rem; }
         .ref-badge { background: rgba(239, 68, 68, 0.12); color: #f87171; padding: 0.25rem 0.5rem; border-radius: 6px; font-size: 0.8rem; font-family: monospace; font-weight: 600; border: 1px solid rgba(239, 68, 68, 0.2); white-space: nowrap; }
@@ -860,7 +873,8 @@ $fileLabel = $fileCount === 1 ? ($resultData['files'][0]['name'] ?? 'Report.csv'
                                 data-compared="<?php echo (int) ($resultData['bookings_compared'] ?? 0); ?>"
                                 data-skipped="<?php echo (int) ($resultData['status_skipped'] ?? 0); ?>"
                                 data-exists="<?php echo (int) $resultData['already_exists_skip']; ?>"
-                                data-missing="<?php echo (int) $resultData['missing_printed']; ?>">
+                                data-missing="<?php echo (int) $resultData['missing_printed']; ?>"
+                                data-cancelled="<?php echo (int) ($resultData['cancelled_count'] ?? 0); ?>">
                             All CSV Files (<?php echo count($resultData['files'] ?? []); ?>)
                         </option>
                         <?php foreach (($resultData['files'] ?? []) as $file): ?>
@@ -869,7 +883,8 @@ $fileLabel = $fileCount === 1 ? ($resultData['files'][0]['name'] ?? 'Report.csv'
                                     data-compared="<?php echo (int) ($file['bookings_compared'] ?? 0); ?>"
                                     data-skipped="<?php echo (int) ($file['status_skipped'] ?? 0); ?>"
                                     data-exists="<?php echo (int) $file['already_exists_skip']; ?>"
-                                    data-missing="<?php echo (int) $file['missing_printed']; ?>">
+                                    data-missing="<?php echo (int) $file['missing_printed']; ?>"
+                                    data-cancelled="<?php echo (int) ($file['cancelled_count'] ?? 0); ?>">
                                 <?php echo htmlspecialchars($file['name']); ?>
                             </option>
                         <?php endforeach; ?>
@@ -892,6 +907,7 @@ $fileLabel = $fileCount === 1 ? ($resultData['files'][0]['name'] ?? 'Report.csv'
                 <button type="button" class="stat-card" data-detail-target="total"><div class="stat-val stat-green"><?php echo (int) $resultData['total_bookings_checked']; ?></div><div class="stat-label">Total Bookings</div><div class="stat-subtext" id="comparedBreakdown"><?php echo (int) ($resultData['bookings_compared'] ?? 0); ?> compared, <?php echo (int) ($resultData['status_skipped'] ?? 0); ?> skipped by status</div></button>
                 <button type="button" class="stat-card" data-detail-target="exists"><div class="stat-val stat-orange"><?php echo (int) $resultData['already_exists_skip']; ?></div><div class="stat-label">Already on Calendar</div></button>
                 <button type="button" class="stat-card" data-detail-target="missing"><div class="stat-val stat-red"><?php echo (int) $resultData['missing_printed']; ?></div><div class="stat-label">Missing Bookings</div></button>
+                <button type="button" class="stat-card" data-detail-target="cancelled"><div class="stat-val stat-purple"><?php echo (int) ($resultData['cancelled_count'] ?? 0); ?></div><div class="stat-label">Cancelled Bookings</div></button>
             </div>
 
             <div class="stat-detail-panel" id="detail-calendars">
@@ -921,6 +937,7 @@ $fileLabel = $fileCount === 1 ? ($resultData['files'][0]['name'] ?? 'Report.csv'
                     'total' => ['title' => 'Total Bookings Uploaded', 'note' => 'All booking rows read from valid CSV reports, with CSV status and calendar result.', 'rows' => $resultData['all_bookings'] ?? $resultData['checked_bookings'] ?? []],
                     'exists' => ['title' => 'Already On Calendar', 'note' => 'CSV bookings whose booking references exist in one of the Google Calendars.', 'rows' => $resultData['already_exists'] ?? []],
                     'missing' => ['title' => 'Missing Bookings', 'note' => 'CSV bookings whose references do not exist in Google Calendar events.', 'rows' => $resultData['missing'] ?? []],
+                    'cancelled' => ['title' => 'Cancelled Bookings', 'note' => 'CSV bookings with a cancelled status (skipped for calendar synchronization checks).', 'rows' => $resultData['cancelled'] ?? []],
                 ];
             ?>
             <?php foreach ($detailSets as $detailId => $detail): ?>
@@ -945,7 +962,7 @@ $fileLabel = $fileCount === 1 ? ($resultData['files'][0]['name'] ?? 'Report.csv'
                                                 $csvStatus = (string) ($booking['CSV Status'] ?? '');
                                                 $calendarCheck = (string) ($booking['Calendar Check'] ?? 'Checked');
                                                 $calendarResult = (string) ($booking['Calendar Result'] ?? ($detailId === 'missing' ? 'Missing from calendar' : ($detailId === 'exists' ? 'Already on calendar' : 'Checked')));
-                                                $statusClass = in_array($csvStatus, ['Confirmed', 'Amended'], true) ? 'ok' : 'warn';
+                                                $statusClass = in_array($csvStatus, ['Confirmed', 'Amended'], true) ? 'ok' : (stripos($csvStatus, 'cancel') !== false ? 'bad' : 'warn');
                                                 $resultClass = stripos($calendarResult, 'missing') !== false ? 'bad' : (stripos($calendarResult, 'already') !== false ? 'ok' : 'warn');
                                             ?>
                                             <tr data-csv="<?php echo htmlspecialchars($booking['_csv_name'] ?? 'Report.csv'); ?>">
@@ -1000,9 +1017,20 @@ $fileLabel = $fileCount === 1 ? ($resultData['files'][0]['name'] ?? 'Report.csv'
             <?php endif; ?>
 
             <div class="glass-card" style="padding-top: 1.5rem;">
+                <?php 
+                $gridBookings = array_merge(
+                    array_map(function($b) { $b['_grid_type'] = 'missing'; return $b; }, $resultData['missing'] ?? []),
+                    array_map(function($b) { $b['_grid_type'] = 'cancelled'; return $b; }, $resultData['cancelled'] ?? [])
+                );
+                usort($gridBookings, function($a, $b) {
+                    $dateA = $a['Start Date'] ?? '';
+                    $dateB = $b['Start Date'] ?? '';
+                    return strcmp($dateA, $dateB);
+                });
+                ?>
                 <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1.5rem; flex-wrap: wrap; gap: 0.5rem;">
-                    <h2 style="font-size: 1.35rem; font-weight: 600;">Missing Calendar Events</h2>
-                    <span style="color: var(--text-secondary); font-size: 0.9rem;" id="filterCount">Showing <?php echo count($resultData['missing']); ?> bookings</span>
+                    <h2 style="font-size: 1.35rem; font-weight: 600;">Missing &amp; Cancelled Calendar Events</h2>
+                    <span style="color: var(--text-secondary); font-size: 0.9rem;" id="filterCount">Showing <?php echo count($gridBookings); ?> bookings</span>
                 </div>
 
                 <div class="search-container">
@@ -1017,23 +1045,28 @@ $fileLabel = $fileCount === 1 ? ($resultData['files'][0]['name'] ?? 'Report.csv'
                             <h3>No CSV Files Uploaded</h3>
                             <p class="subtitle" style="margin-top: 0.5rem;">Click the <strong>Upload CSVs</strong> button at the top right to upload your booking CSV reports and compare them with your Google Calendar.</p>
                         </div>
-                    <?php elseif (empty($resultData['missing'])): ?>
+                    <?php elseif (empty($gridBookings)): ?>
                         <div class="empty-state" style="grid-column: 1 / -1;">
                             <span class="empty-icon">OK</span>
                             <h3>All Bookings Logged</h3>
                             <p class="subtitle" style="margin-top: 0.5rem;">Every checked booking in the uploaded CSV file<?php echo $fileCount === 1 ? '' : 's'; ?> exists on your Google Calendar.</p>
                         </div>
                     <?php else: ?>
-                        <?php $idx = 0; foreach ($resultData['missing'] as $booking): $idx++; ?>
+                        <?php $idx = 0; foreach ($gridBookings as $booking): $idx++; ?>
                             <?php
                                 $searchText = strtolower(implode(' ', array_map('strval', $booking)));
                                 $copyJson = bookingCopyJson($booking);
                             ?>
-                            <div class="booking-card" style="animation-delay: <?php echo ($idx < 30) ? ($idx * 0.03) : 0; ?>s;" data-search="<?php echo htmlspecialchars($searchText); ?>" data-csv="<?php echo htmlspecialchars($booking['_csv_name'] ?? 'Report.csv'); ?>">
+                            <div class="booking-card <?php echo (($booking['_grid_type'] ?? '') === 'cancelled') ? 'cancelled' : ''; ?>" style="animation-delay: <?php echo ($idx < 30) ? ($idx * 0.03) : 0; ?>s;" data-search="<?php echo htmlspecialchars($searchText); ?>" data-csv="<?php echo htmlspecialchars($booking['_csv_name'] ?? 'Report.csv'); ?>">
                                 <div>
                                     <div class="card-header">
                                         <div class="traveler-name"><?php echo htmlspecialchars($booking['Name'] ?? 'Unknown Traveler'); ?></div>
-                                        <div class="ref-badge"><?php echo htmlspecialchars($booking['Ref'] ?? 'N/A'); ?></div>
+                                        <div style="display: flex; gap: 0.5rem; align-items: center;">
+                                            <?php if (($booking['_grid_type'] ?? '') === 'cancelled'): ?>
+                                                <span class="status-pill bad" style="font-size: 0.75rem;">CANCELLED</span>
+                                            <?php endif; ?>
+                                            <div class="ref-badge" <?php echo (($booking['_grid_type'] ?? '') === 'cancelled') ? 'style="background: rgba(168, 85, 247, 0.12); color: #c084fc; border-color: rgba(168, 85, 247, 0.2);"' : ''; ?>><?php echo htmlspecialchars($booking['Ref'] ?? 'N/A'); ?></div>
+                                        </div>
                                     </div>
                                     <div class="tour-title"><?php echo htmlspecialchars($booking['Tour'] ?? 'No Tour Specified'); ?></div>
                                 </div>
@@ -1166,11 +1199,13 @@ $fileLabel = $fileCount === 1 ? ($resultData['files'][0]['name'] ?? 'Report.csv'
             const statTotalVal = document.querySelector('[data-detail-target="total"] .stat-val');
             const statExistsVal = document.querySelector('[data-detail-target="exists"] .stat-val');
             const statMissingVal = document.querySelector('[data-detail-target="missing"] .stat-val');
+            const statCancelledVal = document.querySelector('[data-detail-target="cancelled"] .stat-val');
             const comparedBreakdown = document.getElementById('comparedBreakdown');
 
             if (statTotalVal) statTotalVal.textContent = selectedOption.dataset.total || '0';
             if (statExistsVal) statExistsVal.textContent = selectedOption.dataset.exists || '0';
             if (statMissingVal) statMissingVal.textContent = selectedOption.dataset.missing || '0';
+            if (statCancelledVal) statCancelledVal.textContent = selectedOption.dataset.cancelled || '0';
             if (comparedBreakdown) {
                 comparedBreakdown.textContent = `${selectedOption.dataset.compared || '0'} compared, ${selectedOption.dataset.skipped || '0'} skipped by status`;
             }

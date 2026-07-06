@@ -558,10 +558,23 @@ function findMissingBookings(array $bookings, array $calendarReferences, bool $i
     $checkedBookings = [];
     $alreadyExists = [];
     $missing = [];
+    $cancelled = [];
 
     foreach ($bookings as $booking) {
         $bookingObject = buildMissingBookingObject($booking);
         $bookingObject['CSV Status'] = $booking['Status'] ?? '';
+
+        $status = strtolower(trim($booking['Status'] ?? ''));
+        $isCancelled = str_contains($status, 'cancel') || str_contains($status, 'canceled');
+
+        if ($isCancelled) {
+            $statusSkipped++;
+            $bookingObject['Calendar Check'] = 'Not checked';
+            $bookingObject['Calendar Result'] = 'Cancelled';
+            $allBookings[] = $bookingObject;
+            $cancelled[] = $bookingObject;
+            continue;
+        }
 
         if (!shouldCheckBooking($booking, $includeCancelled)) {
             $statusSkipped++;
@@ -600,6 +613,7 @@ function findMissingBookings(array $bookings, array $calendarReferences, bool $i
         'checked_bookings' => $checkedBookings,
         'already_exists' => $alreadyExists,
         'missing' => $missing,
+        'cancelled' => $cancelled,
     ];
 }
 
