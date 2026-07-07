@@ -701,6 +701,12 @@ function normalizePhone(string $phone): string
     if ($phone === '') {
         return '';
     }
+    if ($phone[0] === '0') {
+        $phone = trim(substr($phone, 1));
+    }
+    if ($phone === '') {
+        return '';
+    }
     if ($phone[0] !== '+') {
         return '+' . $phone;
     }
