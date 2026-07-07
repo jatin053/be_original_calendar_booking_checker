@@ -699,7 +699,7 @@ function normalizePhone(string $phone): string
 {
     $phone = trim($phone);
     if ($phone === '') {
-        return '+';
+        return '';
     }
     if ($phone[0] !== '+') {
         return '+' . $phone;
