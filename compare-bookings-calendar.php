@@ -640,7 +640,7 @@ function buildMissingBookingObject(array $booking): array
         'End Date' => buildEndDate($startDate),
         'Guests' => (int) ($booking['Number of Passengers'] ?? 0),
         'Name' => $booking['Lead traveler Name'] ?? '',
-        'Phone' => $booking['Lead traveler Contact Info'] ?? '',
+        'Phone' => normalizePhone($booking['Lead traveler Contact Info'] ?? ''),
         'Ref' => $booking['Booking Reference'] ?? '',
         'Source' => normalizeSource($booking['Booking Source'] ?? ''),
         'Start Date' => $startDate,
@@ -692,7 +692,19 @@ function detectCity(string $tourName): string
 
 function normalizeSource(string $source): string
 {
-    return strcasecmp($source, 'Viator') === 0 ? 'Viator.com' : $source;
+    return 'Viator.com';
+}
+
+function normalizePhone(string $phone): string
+{
+    $phone = trim($phone);
+    if ($phone === '') {
+        return '+';
+    }
+    if ($phone[0] !== '+') {
+        return '+' . $phone;
+    }
+    return $phone;
 }
 
 function googleGet(string $accessToken, string $url, array $params = []): array
