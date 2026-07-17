@@ -170,7 +170,7 @@ function runAuthOnly(?string $code = null): array
     return runJsonCommand($cmd);
 }
 
-function getPhpBinary(): string
+    function getPhpBinary(): string
 {
     $candidates = [];
 
