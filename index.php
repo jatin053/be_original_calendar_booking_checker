@@ -36,7 +36,7 @@ if (!$hasToken) {
 
 function normalizeReportType(?string $reportType): string
 {
-    return $reportType === 'booking_agent_sheet' ? 'booking_agent_sheet' : 'booking_request';
+    return in_array($reportType, ['booking_agent_sheet', 'airbnb'], true) ? $reportType : 'booking_request';
 }
 
 function filterFilesByReportType(array $files, string $reportType): array
@@ -167,9 +167,13 @@ function isValidTokenFile(string $tokenFile): bool
 
 function runCompareScript(string $csvPath, string $reportType = 'booking_request'): array
 {
-    $scriptName = $reportType === 'booking_agent_sheet'
-        ? 'compare-booking-agent-calendar.php'
-        : 'compare-bookings-calendar.php';
+    if ($reportType === 'booking_agent_sheet') {
+        $scriptName = 'compare-booking-agent-calendar.php';
+    } elseif ($reportType === 'airbnb') {
+        $scriptName = 'compare-airbnb-calendar.php';
+    } else {
+        $scriptName = 'compare-bookings-calendar.php';
+    }
     $scriptPath = __DIR__ . '/' . $scriptName;
     $redirectUri = getRedirectUri();
     $phpBinary = getPhpBinary();
@@ -931,6 +935,7 @@ $fileLabel = $fileCount === 1 ? ($resultData['files'][0]['name'] ?? 'Report file
                         <select id="reportTypeSelect" class="csv-select" onchange="handleReportTypeChange()">
                             <option value="booking_request" <?php echo $selectedReportType === 'booking_request' ? 'selected' : ''; ?>>Booking Request</option>
                             <option value="booking_agent_sheet" <?php echo $selectedReportType === 'booking_agent_sheet' ? 'selected' : ''; ?>>Booking Agent Sheet</option>
+                            <option value="airbnb" <?php echo $selectedReportType === 'airbnb' ? 'selected' : ''; ?>>Airbnb</option>
                         </select>
                     </div>
                     <form id="uploadForm" method="POST" enctype="multipart/form-data" style="display: none;">
@@ -1239,34 +1244,50 @@ $fileLabel = $fileCount === 1 ? ($resultData['files'][0]['name'] ?? 'Report file
             const reportTypeSelect = document.getElementById('reportTypeSelect');
             if (!reportTypeSelect) return;
 
-            const isAgentSheet = reportTypeSelect.value === 'booking_agent_sheet';
-            const labels = isAgentSheet ? {
-                subtitle: 'Upload a Booking Agent Excel sheet, then connect Google Calendar to compare live events.',
-                fileSelect: 'Excel File:',
-                allFiles: 'All Excel Files',
-                upload: 'Upload Excel',
-                accept: '',
-                total: 'Total Rows',
-                missing: 'Missing Agent Bookings',
-                cancelled: 'Skipped Rows',
-                section: 'Missing Booking Agent Sheet Events',
-                search: 'Search by name, booking ref, supplier ref, product, email, phone, or Excel file...',
-                emptyTitle: 'No Excel Files Uploaded',
-                emptyText: 'Click the Upload Excel button at the top right to upload your booking agent sheet and compare it with your Google Calendar.'
-            } : {
-                subtitle: 'Upload one or many CSV booking reports, then connect Google Calendar to compare live events.',
-                fileSelect: 'CSV File:',
-                allFiles: 'All CSV Files',
-                upload: 'Upload CSVs',
-                accept: '',
-                total: 'Total Bookings',
-                missing: 'Missing Bookings',
-                cancelled: 'Cancelled Bookings',
-                section: 'Missing & Cancelled Calendar Events',
-                search: 'Search by name, reference, city, tour, source, phone, amount, or file...',
-                emptyTitle: 'No CSV Files Uploaded',
-                emptyText: 'Click the Upload CSVs button at the top right to upload your booking CSV reports and compare them with your Google Calendar.'
-            };
+            let labels;
+            if (reportTypeSelect.value === 'booking_agent_sheet') {
+                labels = {
+                    subtitle: 'Upload a Booking Agent Excel sheet, then connect Google Calendar to compare live events.',
+                    fileSelect: 'Excel File:',
+                    allFiles: 'All Excel Files',
+                    upload: 'Upload Excel',
+                    total: 'Total Rows',
+                    missing: 'Missing Agent Bookings',
+                    cancelled: 'Skipped Rows',
+                    section: 'Missing Booking Agent Sheet Events',
+                    search: 'Search by name, booking ref, supplier ref, product, email, phone, or Excel file...',
+                    emptyTitle: 'No Excel Files Uploaded',
+                    emptyText: 'Click the Upload Excel button at the top right to upload your booking agent sheet and compare it with your Google Calendar.'
+                };
+            } else if (reportTypeSelect.value === 'airbnb') {
+                labels = {
+                    subtitle: 'Upload an Airbnb report, then connect Google Calendar to compare live events.',
+                    fileSelect: 'Airbnb File:',
+                    allFiles: 'All Airbnb Files',
+                    upload: 'Upload Airbnb',
+                    total: 'Total Airbnb Rows',
+                    missing: 'Missing Airbnb Bookings',
+                    cancelled: 'Skipped Rows',
+                    section: 'Missing Airbnb Calendar Events',
+                    search: 'Search by guest, confirmation code, listing, details, amount, or file...',
+                    emptyTitle: 'No Airbnb Files Uploaded',
+                    emptyText: 'Click the Upload Airbnb button at the top right to upload your Airbnb report and compare it with your Google Calendar.'
+                };
+            } else {
+                labels = {
+                    subtitle: 'Upload one or many CSV booking reports, then connect Google Calendar to compare live events.',
+                    fileSelect: 'CSV File:',
+                    allFiles: 'All CSV Files',
+                    upload: 'Upload CSVs',
+                    total: 'Total Bookings',
+                    missing: 'Missing Bookings',
+                    cancelled: 'Cancelled Bookings',
+                    section: 'Missing & Cancelled Calendar Events',
+                    search: 'Search by name, reference, city, tour, source, phone, amount, or file...',
+                    emptyTitle: 'No CSV Files Uploaded',
+                    emptyText: 'Click the Upload CSVs button at the top right to upload your booking CSV reports and compare them with your Google Calendar.'
+                };
+            }
 
             const setText = (id, value) => {
                 const element = document.getElementById(id);
@@ -1307,7 +1328,8 @@ $fileLabel = $fileCount === 1 ? ($resultData['files'][0]['name'] ?? 'Report file
             if (!csvSelect || !reportTypeSelect || !panel) return;
 
             const selectedOption = csvSelect.options[csvSelect.selectedIndex];
-            const selectedFile = csvSelect.value === 'all' ? (reportTypeSelect.value === 'booking_agent_sheet' ? 'All Excel Files' : 'All CSV Files') : csvSelect.value;
+            const allFileLabel = reportTypeSelect.value === 'booking_agent_sheet' ? 'All Excel Files' : (reportTypeSelect.value === 'airbnb' ? 'All Airbnb Files' : 'All CSV Files');
+            const selectedFile = csvSelect.value === 'all' ? allFileLabel : csvSelect.value;
             const total = selectedOption ? (selectedOption.dataset.total || '0') : '0';
             const compared = selectedOption ? (selectedOption.dataset.compared || '0') : '0';
 
@@ -1340,8 +1362,25 @@ $fileLabel = $fileCount === 1 ? ($resultData['files'][0]['name'] ?? 'Report file
                 'Reseller Information'
             ].join(', ');
 
+            const airbnbFields = [
+                'Date',
+                'Type',
+                'Confirmation Code',
+                'Booking date',
+                'Start date',
+                'End date',
+                'Guest',
+                'Listing',
+                'Details',
+                'Currency',
+                'Amount',
+                'Gross earnings'
+            ].join(', ');
+
             if (reportTypeSelect.value === 'booking_agent_sheet') {
                 panel.innerHTML = `<strong>Booking Agent Sheet:</strong> use the Excel fields: ${bookingAgentFields}.`;
+            } else if (reportTypeSelect.value === 'airbnb') {
+                panel.innerHTML = `<strong>Airbnb:</strong> use the Airbnb fields: ${airbnbFields}. Matching uses Confirmation Code.`;
             } else {
                 panel.innerHTML = `<strong>Booking Request:</strong> existing script runs for ${selectedFile} (${total} total, ${compared} compared). Required CSV fields: ${bookingRequestFields}.`;
             }
