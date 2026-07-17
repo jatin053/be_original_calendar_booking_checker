@@ -7,6 +7,8 @@ $authUrl = null;
 $resultData = null;
 $tokenFile = __DIR__ . '/token.json';
 $hasToken = isValidTokenFile($tokenFile);
+$selectedReportType = normalizeReportType($_POST['report_type'] ?? $_GET['report_type'] ?? ($_SESSION['selected_report_type'] ?? 'booking_request'));
+$_SESSION['selected_report_type'] = $selectedReportType;
 
 if (isset($_GET['reset'])) {
     unset($_SESSION['csv_files']);
@@ -32,6 +34,21 @@ if (!$hasToken) {
     }
 }
 
+function normalizeReportType(?string $reportType): string
+{
+    return $reportType === 'booking_agent_sheet' ? 'booking_agent_sheet' : 'booking_request';
+}
+
+function filterFilesByReportType(array $files, string $reportType): array
+{
+    $filtered = [];
+    foreach ($files as $file) {
+        if (normalizeReportType($file['report_type'] ?? 'booking_request') === $reportType) {
+            $filtered[] = $file;
+        }
+    }
+    return $filtered;
+}
 function getRedirectUri(): string
 {
     $host = $_SERVER['HTTP_HOST'] ?? 'localhost:8888';
@@ -148,9 +165,12 @@ function isValidTokenFile(string $tokenFile): bool
     return true;
 }
 
-function runCompareScript(string $csvPath): array
+function runCompareScript(string $csvPath, string $reportType = 'booking_request'): array
 {
-    $scriptPath = __DIR__ . '/compare-bookings-calendar.php';
+    $scriptName = $reportType === 'booking_agent_sheet'
+        ? 'compare-booking-agent-calendar.php'
+        : 'compare-bookings-calendar.php';
+    $scriptPath = __DIR__ . '/' . $scriptName;
     $redirectUri = getRedirectUri();
     $phpBinary = getPhpBinary();
     $cmd = escapeshellarg($phpBinary) . ' ' . escapeshellarg($scriptPath) . ' ' . escapeshellarg($csvPath) . ' --with-summary --no-interactive --redirect-uri=' . escapeshellarg($redirectUri);
@@ -295,14 +315,14 @@ function combineResults(array $files): array
             continue;
         }
 
-        $response = runCompareScript($file['path']);
+        $response = runCompareScript($file['path'], $file['report_type'] ?? 'booking_request');
         if (isset($response['status']) && $response['status'] === 'error') {
             if (($response['error'] ?? '') === 'auth_required') {
                 return $response;
             }
             $combined['file_errors'][] = [
                 'name' => $file['name'] ?? basename($file['path']),
-                'message' => $response['message'] ?? 'This CSV could not be processed.',
+                'message' => $response['message'] ?? 'Th        is file could not be processed.',
             ];
             continue;
         }
@@ -311,6 +331,7 @@ function combineResults(array $files): array
 
         $fileSummary = [
             'name' => $file['name'] ?? basename($file['path']),
+            'report_type' => $file['report_type'] ?? 'booking_request',
             'calendar_count_checked' => (int) ($response['calendar_count_checked'] ?? 0),
             'total_bookings_checked' => (int) ($response['total_bookings_checked'] ?? 0),
             'bookings_compared' => (int) ($response['bookings_compared'] ?? $response['total_bookings_checked'] ?? 0),
@@ -362,11 +383,11 @@ function combineResults(array $files): array
     $combined['calendar_ids_checked'] = array_keys($combined['calendar_ids_checked']);
 
     if ($combined['files_processed'] === 0 && $combined['file_errors'] !== []) {
-        $firstError = $combined['file_errors'][0]['message'] ?? 'No valid booking CSV files were processed.';
+        $firstError = $combined['file_errors'][0]['message'] ?? 'No valid booking files were processed.';
         return [
             'status' => 'error',
             'error' => 'csv_errors',
-            'message' => 'No valid booking CSV files were processed. ' . $firstError,
+            'message' => 'No valid booking files were processed. ' . $firstError,
             'file_errors' => $combined['file_errors'],
         ];
     }
@@ -424,7 +445,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'submi
             $hasToken = true;
             $authUrl = null;
             if (!empty($_SESSION['csv_files'])) {
-                $resultData = combineResults($_SESSION['csv_files']);
+                $resultData = combineResults(filterFilesByReportType($_SESSION['csv_files'], $selectedReportType));
                 if (isset($resultData['status']) && $resultData['status'] === 'error') {
                     $error = $resultData['message'] ?? 'An API error occurred.';
                     $authUrl = ($resultData['error'] ?? '') === 'auth_required' ? getGoogleAuthUrl() : null;
@@ -438,6 +459,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'submi
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_FILES['booking_csv']) && $error === null) {
     $savedFiles = $_SESSION['csv_files'] ?? [];
     $newFilesUploaded = 0;
+    $reportType = $selectedReportType;
 
     foreach (normalizeUploadedFiles($_FILES['booking_csv']) as $file) {
         if ($file['error'] === UPLOAD_ERR_NO_FILE) {
@@ -450,12 +472,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_FILES['booking_csv']) && $e
         }
 
         $extension = strtolower(pathinfo($file['name'], PATHINFO_EXTENSION));
-        if ($extension !== 'csv') {
-            $error = 'Only CSV files are allowed. Invalid file: ' . $file['name'];
-            break;
-        }
-
-        $tempPath = $uploadDir . '/' . uniqid('booking_', true) . '.csv';
+        $safeExtension = preg_match('/^[a-z0-9]{1,12}$/', $extension) ? $extension : 'upload';
+        $tempPath = $uploadDir . '/' . uniqid('booking_', true) . '.' . $safeExtension;
         if (!move_uploaded_file($file['tmp_name'], $tempPath)) {
             $error = 'Failed to save the uploaded file: ' . $file['name'];
             break;
@@ -464,7 +482,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_FILES['booking_csv']) && $e
         // Avoid duplicate filenames in the session list
         $existsKey = -1;
         foreach ($savedFiles as $key => $existingFile) {
-            if ($existingFile['name'] === $file['name']) {
+            if ($existingFile['name'] === $file['name'] && normalizeReportType($existingFile['report_type'] ?? 'booking_request') === $reportType) {
                 $existsKey = $key;
                 break;
             }
@@ -475,17 +493,19 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_FILES['booking_csv']) && $e
                 @unlink($savedFiles[$existsKey]['path']);
             }
             $savedFiles[$existsKey]['path'] = $tempPath;
+            $savedFiles[$existsKey]['report_type'] = $reportType;
         } else {
             $savedFiles[] = [
                 'path' => $tempPath,
                 'name' => $file['name'],
+                'report_type' => $reportType,
             ];
         }
         $newFilesUploaded++;
     }
 
     if ($error === null && $newFilesUploaded === 0 && empty($_SESSION['csv_files'])) {
-        $error = 'Please select at least one CSV file.';
+        $error = 'Please select at least one file.';
     }
 
     if ($error === null) {
@@ -493,7 +513,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_FILES['booking_csv']) && $e
         if (!$hasToken) {
             $authUrl = getGoogleAuthUrl();
         } else {
-            $response = combineResults($savedFiles);
+            $response = combineResults(filterFilesByReportType($savedFiles, $selectedReportType));
             if (isset($response['status']) && $response['status'] === 'error') {
                 $error = $response['message'] ?? 'An API error occurred.';
                 $authUrl = ($response['error'] ?? '') === 'auth_required' ? getGoogleAuthUrl() : null;
@@ -505,7 +525,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_FILES['booking_csv']) && $e
 }
 
 if ($resultData === null && $authUrl === null && $error === null && !empty($_SESSION['csv_files'])) {
-    $response = combineResults($_SESSION['csv_files']);
+    $response = combineResults(filterFilesByReportType($_SESSION['csv_files'], $selectedReportType));
     if (isset($response['status']) && $response['status'] === 'error') {
         $error = $response['message'] ?? 'An API error occurred.';
         $authUrl = ($response['error'] ?? '') === 'auth_required' ? getGoogleAuthUrl() : null;
@@ -533,7 +553,8 @@ if ($resultData === null) {
 }
 
 $fileCount = count($resultData['files'] ?? []);
-$fileLabel = $fileCount === 1 ? ($resultData['files'][0]['name'] ?? 'Report.csv') : $fileCount . ' CSV files';
+$visibleSessionFiles = filterFilesByReportType($_SESSION['csv_files'] ?? [], $selectedReportType);
+$fileLabel = $fileCount === 1 ? ($resultData['files'][0]['name'] ?? 'Report file') : $fileCount . ' files';
 ?>
 <!DOCTYPE html>
 <html lang="en">
@@ -634,7 +655,8 @@ $fileLabel = $fileCount === 1 ? ($resultData['files'][0]['name'] ?? 'Report.csv'
         .code-input-form { display: flex; flex-direction: column; gap: 1rem; margin-top: 1.5rem; }
         .input-text { width: 100%; padding: 0.85rem 1rem; border-radius: 8px; border: 1px solid var(--border-color); background: rgba(0, 0, 0, 0.2); color: #ffffff; font-family: var(--font-family); font-size: 0.95rem; }
         .input-text:focus { outline: none; border-color: var(--accent-primary); }
-        .dashboard-header { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 1rem; margin-bottom: 1.5rem; }
+        .dashboard-header { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 1rem; margin-bottom: 1rem; }
+        .dashboard-actions { display: flex; gap: 0.75rem; align-items: center; flex-wrap: wrap; justify-content: flex-end; }
         .csv-dropdown-container {
             display: inline-flex;
             align-items: center;
@@ -664,6 +686,19 @@ $fileLabel = $fileCount === 1 ? ($resultData['files'][0]['name'] ?? 'Report.csv'
             background: #0f172a;
             color: #ffffff;
         }
+        .file-info-strip {
+            display: none;
+            margin: 0 0 1.5rem;
+            padding: 0.85rem 1rem;
+            border: 1px solid var(--border-color);
+            border-radius: 10px;
+            background: rgba(255, 255, 255, 0.03);
+            color: var(--text-secondary);
+            font-size: 0.9rem;
+            line-height: 1.5;
+        }
+        .file-info-strip.is-visible { display: block; }
+        .file-info-strip strong { color: var(--text-primary); }
         .pagination-container {
             display: flex;
             justify-content: center;
@@ -834,7 +869,7 @@ $fileLabel = $fileCount === 1 ? ($resultData['files'][0]['name'] ?? 'Report.csv'
     <div class="container">
         <header>
             <h1>Google Calendar Sync Check</h1>
-            <p class="subtitle">Upload one or many CSV booking reports, then connect Google Calendar to compare live events.</p>
+            <p class="subtitle" id="pageSubtitle">Upload one or many CSV booking reports, then connect Google Calendar to compare live events.</p>
         </header>
 
         <?php if ($error !== null): ?>
@@ -843,7 +878,7 @@ $fileLabel = $fileCount === 1 ? ($resultData['files'][0]['name'] ?? 'Report.csv'
                 <div class="glass-card" style="padding: 1rem; border-color: rgba(239, 68, 68, 0.3);">
                     <?php foreach ($response['file_errors'] as $fileError): ?>
                         <div style="color: #fca5a5; margin: 0.35rem 0;">
-                            <strong><?php echo htmlspecialchars($fileError['name'] ?? 'CSV file'); ?>:</strong>
+                            <strong><?php echo htmlspecialchars($fileError['name'] ?? 'File'); ?>:</strong>
                             <?php echo htmlspecialchars($fileError['message'] ?? 'Could not process this file.'); ?>
                         </div>
                     <?php endforeach; ?>
@@ -866,7 +901,7 @@ $fileLabel = $fileCount === 1 ? ($resultData['files'][0]['name'] ?? 'Report.csv'
         <?php else: ?>
             <div class="dashboard-header">
                 <div class="csv-dropdown-container">
-                    <span class="csv-select-label">CSV File:</span>
+                    <span class="csv-select-label" id="fileSelectLabel">CSV File:</span>
                     <select id="csvSelect" class="csv-select" onchange="currentPage = 1; filterDashboard()">
                         <option value="all" 
                                 data-total="<?php echo (int) $resultData['total_bookings_checked']; ?>"
@@ -890,24 +925,32 @@ $fileLabel = $fileCount === 1 ? ($resultData['files'][0]['name'] ?? 'Report.csv'
                         <?php endforeach; ?>
                     </select>
                 </div>
-                <div style="display: flex; gap: 0.75rem; align-items: center;">
+                <div class="dashboard-actions">
+                    <div class="csv-dropdown-container">
+                        <span class="csv-select-label">Report Type:</span>
+                        <select id="reportTypeSelect" class="csv-select" onchange="handleReportTypeChange()">
+                            <option value="booking_request" <?php echo $selectedReportType === 'booking_request' ? 'selected' : ''; ?>>Booking Request</option>
+                            <option value="booking_agent_sheet" <?php echo $selectedReportType === 'booking_agent_sheet' ? 'selected' : ''; ?>>Booking Agent Sheet</option>
+                        </select>
+                    </div>
                     <form id="uploadForm" method="POST" enctype="multipart/form-data" style="display: none;">
-                        <input id="csvInput" type="file" name="booking_csv[]" accept=".csv,text/csv" multiple required>
+                        <input type="hidden" id="reportTypeInput" name="report_type" value="<?php echo htmlspecialchars($selectedReportType); ?>"><input id="csvInput" type="file" name="booking_csv[]" multiple required>
                     </form>
-                    <label for="csvInput" class="btn btn-secondary" style="cursor: pointer; margin: 0; user-select: none;">Upload CSVs</label>
+                    <label for="csvInput" id="uploadButtonLabel" class="btn btn-secondary" style="cursor: pointer; margin: 0; user-select: none;">Upload CSVs</label>
                     <?php if (!empty($_SESSION['csv_files'])): ?>
-                        <a href="index.php?reset=1" class="btn btn-secondary">Clear CSVs</a>
+                        <a href="index.php?reset=1" class="btn btn-secondary">Clear Files</a>
                     <?php endif; ?>
                     <a href="index.php?logout=1" class="btn btn-danger">Logout</a>
                 </div>
             </div>
+            <div id="fileInfoPanel" class="file-info-strip"></div>
 
             <div class="stats-grid">
                 <button type="button" class="stat-card" data-detail-target="calendars"><div class="stat-val stat-blue"><?php echo (int) $resultData['calendar_count_checked']; ?></div><div class="stat-label">Calendars Checked</div></button>
-                <button type="button" class="stat-card" data-detail-target="total"><div class="stat-val stat-green"><?php echo (int) $resultData['total_bookings_checked']; ?></div><div class="stat-label">Total Bookings</div><div class="stat-subtext" id="comparedBreakdown"><?php echo (int) ($resultData['bookings_compared'] ?? 0); ?> compared, <?php echo (int) ($resultData['status_skipped'] ?? 0); ?> skipped by status</div></button>
+                <button type="button" class="stat-card" data-detail-target="total"><div class="stat-val stat-green"><?php echo (int) $resultData['total_bookings_checked']; ?></div><div class="stat-label" id="totalStatLabel">Total Bookings</div><div class="stat-subtext" id="comparedBreakdown"><?php echo (int) ($resultData['bookings_compared'] ?? 0); ?> compared, <?php echo (int) ($resultData['status_skipped'] ?? 0); ?> skipped by status</div></button>
                 <button type="button" class="stat-card" data-detail-target="exists"><div class="stat-val stat-orange"><?php echo (int) $resultData['already_exists_skip']; ?></div><div class="stat-label">Already on Calendar</div></button>
-                <button type="button" class="stat-card" data-detail-target="missing"><div class="stat-val stat-red"><?php echo (int) $resultData['missing_printed']; ?></div><div class="stat-label">Missing Bookings</div></button>
-                <button type="button" class="stat-card" data-detail-target="cancelled"><div class="stat-val stat-purple"><?php echo (int) ($resultData['cancelled_count'] ?? 0); ?></div><div class="stat-label">Cancelled Bookings</div></button>
+                <button type="button" class="stat-card" data-detail-target="missing"><div class="stat-val stat-red"><?php echo (int) $resultData['missing_printed']; ?></div><div class="stat-label" id="missingStatLabel">Missing Bookings</div></button>
+                <button type="button" class="stat-card" data-detail-target="cancelled"><div class="stat-val stat-purple"><?php echo (int) ($resultData['cancelled_count'] ?? 0); ?></div><div class="stat-label" id="cancelledStatLabel">Cancelled Bookings</div></button>
             </div>
 
             <div class="stat-detail-panel" id="detail-calendars">
@@ -988,11 +1031,11 @@ $fileLabel = $fileCount === 1 ? ($resultData['files'][0]['name'] ?? 'Report.csv'
 
             <?php if (!empty($resultData['file_errors'])): ?>
                 <details class="glass-card skipped-files">
-                    <summary>Skipped CSV files (<?php echo count($resultData['file_errors']); ?>)</summary>
+                    <summary>Skipped files (<?php echo count($resultData['file_errors']); ?>)</summary>
                     <div class="skipped-files-list">
                         <?php foreach ($resultData['file_errors'] as $fileError): ?>
                             <div style="color: var(--text-secondary); margin: 0.35rem 0;">
-                                <strong style="color: var(--text-primary);"><?php echo htmlspecialchars($fileError['name'] ?? 'CSV file'); ?>:</strong>
+                                <strong style="color: var(--text-primary);"><?php echo htmlspecialchars($fileError['name'] ?? 'File'); ?>:</strong>
                                 <?php echo htmlspecialchars($fileError['message'] ?? 'Could not process this file.'); ?>
                             </div>
                         <?php endforeach; ?>
@@ -1001,7 +1044,7 @@ $fileLabel = $fileCount === 1 ? ($resultData['files'][0]['name'] ?? 'Report.csv'
             <?php endif; ?>
 
             <?php if (!empty($resultData['files'])): ?>
-                <h2 class="file-section-title">Processed CSV files</h2>
+                <h2 class="file-section-title">Processed files</h2>
                 <div class="file-grid">
                     <?php foreach ($resultData['files'] as $file): ?>
                         <div class="file-summary">
@@ -1029,27 +1072,27 @@ $fileLabel = $fileCount === 1 ? ($resultData['files'][0]['name'] ?? 'Report.csv'
                 });
                 ?>
                 <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1.5rem; flex-wrap: wrap; gap: 0.5rem;">
-                    <h2 style="font-size: 1.35rem; font-weight: 600;">Missing &amp; Cancelled Calendar Events</h2>
+                    <h2 id="missingSectionTitle" style="font-size: 1.35rem; font-weight: 600;">Missing &amp; Cancelled Calendar Events</h2>
                     <span style="color: var(--text-secondary); font-size: 0.9rem;" id="filterCount">Showing <?php echo count($gridBookings); ?> bookings</span>
                 </div>
 
                 <div class="search-container">
                     <span class="search-icon">Search</span>
-                    <input type="text" id="searchInput" class="search-input" placeholder="Search by name, reference, city, tour, source, phone, amount, or CSV file..." onkeyup="filterBookings()">
+                    <input type="text" id="searchInput" class="search-input" placeholder="Search by name, reference, city, tour, source, phone, amount, or file..." onkeyup="filterBookings()">
                 </div>
 
                 <div class="bookings-grid" id="bookingsGrid">
-                    <?php if (empty($_SESSION['csv_files'])): ?>
+                    <?php if (empty($visibleSessionFiles)): ?>
                         <div class="empty-state" style="grid-column: 1 / -1;">
                             <span class="empty-icon">📥</span>
-                            <h3>No CSV Files Uploaded</h3>
-                            <p class="subtitle" style="margin-top: 0.5rem;">Click the <strong>Upload CSVs</strong> button at the top right to upload your booking CSV reports and compare them with your Google Calendar.</p>
+                            <h3 id="emptyUploadTitle">No CSV Files Uploaded</h3>
+                            <p class="subtitle" id="emptyUploadText" style="margin-top: 0.5rem;">Click the <strong>Upload CSVs</strong> button at the top right to upload your booking CSV reports and compare them with your Google Calendar.</p>
                         </div>
                     <?php elseif (empty($gridBookings)): ?>
                         <div class="empty-state" style="grid-column: 1 / -1;">
                             <span class="empty-icon">OK</span>
                             <h3>All Bookings Logged</h3>
-                            <p class="subtitle" style="margin-top: 0.5rem;">Every checked booking in the uploaded CSV file<?php echo $fileCount === 1 ? '' : 's'; ?> exists on your Google Calendar.</p>
+                            <p class="subtitle" style="margin-top: 0.5rem;">Every checked booking in the uploaded file<?php echo $fileCount === 1 ? '' : 's'; ?> exists on your Google Calendar.</p>
                         </div>
                     <?php else: ?>
                         <?php $idx = 0; foreach ($gridBookings as $booking): $idx++; ?>
@@ -1185,6 +1228,127 @@ $fileLabel = $fileCount === 1 ? ($resultData['files'][0]['name'] ?? 'Report.csv'
         let currentPage = 1;
         const itemsPerPage = 12;
 
+        function handleReportTypeChange() {
+            const reportTypeSelect = document.getElementById('reportTypeSelect');
+            const reportTypeInput = document.getElementById('reportTypeInput');
+            if (!reportTypeSelect) return;
+            if (reportTypeInput) reportTypeInput.value = reportTypeSelect.value;
+            window.location.href = `index.php?report_type=${encodeURIComponent(reportTypeSelect.value)}`;
+        }
+        function updateReportTypeUi() {
+            const reportTypeSelect = document.getElementById('reportTypeSelect');
+            if (!reportTypeSelect) return;
+
+            const isAgentSheet = reportTypeSelect.value === 'booking_agent_sheet';
+            const labels = isAgentSheet ? {
+                subtitle: 'Upload a Booking Agent Excel sheet, then connect Google Calendar to compare live events.',
+                fileSelect: 'Excel File:',
+                allFiles: 'All Excel Files',
+                upload: 'Upload Excel',
+                accept: '',
+                total: 'Total Rows',
+                missing: 'Missing Agent Bookings',
+                cancelled: 'Skipped Rows',
+                section: 'Missing Booking Agent Sheet Events',
+                search: 'Search by name, booking ref, supplier ref, product, email, phone, or Excel file...',
+                emptyTitle: 'No Excel Files Uploaded',
+                emptyText: 'Click the Upload Excel button at the top right to upload your booking agent sheet and compare it with your Google Calendar.'
+            } : {
+                subtitle: 'Upload one or many CSV booking reports, then connect Google Calendar to compare live events.',
+                fileSelect: 'CSV File:',
+                allFiles: 'All CSV Files',
+                upload: 'Upload CSVs',
+                accept: '',
+                total: 'Total Bookings',
+                missing: 'Missing Bookings',
+                cancelled: 'Cancelled Bookings',
+                section: 'Missing & Cancelled Calendar Events',
+                search: 'Search by name, reference, city, tour, source, phone, amount, or file...',
+                emptyTitle: 'No CSV Files Uploaded',
+                emptyText: 'Click the Upload CSVs button at the top right to upload your booking CSV reports and compare them with your Google Calendar.'
+            };
+
+            const setText = (id, value) => {
+                const element = document.getElementById(id);
+                if (element) element.textContent = value;
+            };
+
+            setText('pageSubtitle', labels.subtitle);
+            setText('fileSelectLabel', labels.fileSelect);
+            setText('uploadButtonLabel', labels.upload);
+            setText('totalStatLabel', labels.total);
+            setText('missingStatLabel', labels.missing);
+            setText('cancelledStatLabel', labels.cancelled);
+            setText('missingSectionTitle', labels.section);
+            setText('emptyUploadTitle', labels.emptyTitle);
+            setText('emptyUploadText', labels.emptyText);
+
+            const csvSelect = document.getElementById('csvSelect');
+            if (csvSelect && csvSelect.options.length > 0) {
+                csvSelect.options[0].textContent = `${labels.allFiles} (${Math.max(csvSelect.options.length - 1, 0)})`;
+            }
+
+            const searchInput = document.getElementById('searchInput');
+            if (searchInput) searchInput.placeholder = labels.search;
+
+            const csvInput = document.getElementById('csvInput');
+            if (csvInput) csvInput.removeAttribute('accept');
+
+            const reportTypeInput = document.getElementById('reportTypeInput');
+            if (reportTypeInput) reportTypeInput.value = reportTypeSelect.value;
+        }
+
+        function updateReportTypePanel() {
+            updateReportTypeUi();
+            const csvSelect = document.getElementById('csvSelect');
+            const reportTypeSelect = document.getElementById('reportTypeSelect');
+            const panel = document.getElementById('fileInfoPanel');
+
+            if (!csvSelect || !reportTypeSelect || !panel) return;
+
+            const selectedOption = csvSelect.options[csvSelect.selectedIndex];
+            const selectedFile = csvSelect.value === 'all' ? (reportTypeSelect.value === 'booking_agent_sheet' ? 'All Excel Files' : 'All CSV Files') : csvSelect.value;
+            const total = selectedOption ? (selectedOption.dataset.total || '0') : '0';
+            const compared = selectedOption ? (selectedOption.dataset.compared || '0') : '0';
+
+            const bookingRequestFields = [
+                'Booking Reference',
+                'Net Price',
+                'Status',
+                'Travel Date',
+                'Lead traveler Name',
+                'Lead traveler Contact Info',
+                'Number of Passengers',
+                'Product Name',
+                'Tour Grade Code',
+                'Booking Source'
+            ].join(', ');
+
+            const bookingAgentFields = [
+                'Date',
+                'Booking Ref #',
+                'Supplier Ref #',
+                'Product',
+                'Option',
+                "Traveler's First Name",
+                "Traveler's Last Name",
+                'Email',
+                'Phone',
+                'Adult/Senior/Student/Youth/Child/Infant',
+                'Net Price',
+                'Language',
+                'Reseller Information'
+            ].join(', ');
+
+            if (reportTypeSelect.value === 'booking_agent_sheet') {
+                panel.innerHTML = `<strong>Booking Agent Sheet:</strong> use the Excel fields: ${bookingAgentFields}.`;
+            } else {
+                panel.innerHTML = `<strong>Booking Request:</strong> existing script runs for ${selectedFile} (${total} total, ${compared} compared). Required CSV fields: ${bookingRequestFields}.`;
+            }
+
+            panel.classList.add('is-visible');
+        }
+
         function filterDashboard() {
             const csvSelect = document.getElementById('csvSelect');
             if (!csvSelect) return;
@@ -1209,6 +1373,7 @@ $fileLabel = $fileCount === 1 ? ($resultData['files'][0]['name'] ?? 'Report.csv'
             if (comparedBreakdown) {
                 comparedBreakdown.textContent = `${selectedOption.dataset.compared || '0'} compared, ${selectedOption.dataset.skipped || '0'} skipped by status`;
             }
+            updateReportTypePanel();
 
             // 2. Filter booking cards under "Missing Calendar Events"
             const searchInput = document.getElementById('searchInput');

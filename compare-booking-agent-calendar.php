@@ -22,23 +22,23 @@ try {
     validateInput($options);
 
     $requiredColumns = [
-        'Booking Reference',
+        'Date',
+        'Booking Ref #',
+        'Supplier Ref #',
+        'Product',
+        'Option',
+        "Traveler's First Name",
+        "Traveler's Last Name",
+        'Email',
+        'Phone',
         'Net Price',
-        'Status',
-        'Travel Date',
-        'Lead traveler Name',
-        'Lead traveler Contact Info',
-        'Number of Passengers',
-        'Product Name',
-        'Tour Grade Code',
-        'Booking Source',
     ];
 
-    $bookings = readBookingReport($options['booking_report'], $requiredColumns);
+    $bookings = readBookingAgentSheet($options['booking_report'], $requiredColumns);
     $accessToken = getGoogleAccessToken($options['credentials_file'], $options['token_file'], $options);
     $calendarIds = $options['calendar_ids'] ?: getCalendarIds($accessToken);
-    $calendarReferences = readLiveCalendarBookingReferences($accessToken, $calendarIds, $bookings, $options['include_cancelled']);
-    $result = findMissingBookings($bookings, $calendarReferences, $options['include_cancelled'], count($calendarIds));
+    $calendarReferences = readLiveCalendarAgentReferences($accessToken, $calendarIds, $bookings);
+    $result = findMissingAgentBookings($bookings, $calendarReferences, count($calendarIds));
     $result['calendar_ids_checked'] = $calendarIds;
 
     $output = $options['with_summary'] ? $result : $result['missing'];
@@ -52,8 +52,6 @@ try {
 } catch (Exception $e) {
     $code = $e->getCode();
     $message = $e->getMessage();
-
-    // Check if it's an authorization/token issue
     $isAuthError = ($code === 400 || $code === 401 || $code === 403) && (
         stripos($message, 'invalid_grant') !== false ||
         stripos($message, 'invalid_token') !== false ||
@@ -62,75 +60,45 @@ try {
         stripos($message, 'unauthorized') !== false
     );
 
-    if ($isAuthError) {
-        if (isset($options['token_file']) && is_file($options['token_file'])) {
-            $tokenData = json_decode((string) @file_get_contents($options['token_file']), true);
-            if (is_array($tokenData) && !empty($tokenData['refresh_token'])) {
-                unset($tokenData['access_token']);
-                @file_put_contents($options['token_file'], json_encode($tokenData, JSON_PRETTY_PRINT));
-            } else {
-                @unlink($options['token_file']);
-            }
+    if ($isAuthError && isset($options['token_file']) && is_file($options['token_file'])) {
+        $tokenData = json_decode((string) @file_get_contents($options['token_file']), true);
+        if (is_array($tokenData) && !empty($tokenData['refresh_token'])) {
+            unset($tokenData['access_token']);
+            @file_put_contents($options['token_file'], json_encode($tokenData, JSON_PRETTY_PRINT));
+        } else {
+            @unlink($options['token_file']);
         }
-
-        if (!empty($options['no_interactive'])) {
-            $authUrl = '';
-            try {
-                $credentials = readJsonFile($options['credentials_file']);
-                $client = $credentials['installed'] ?? $credentials['web'] ?? null;
-                if ($client !== null) {
-                    $redirectUri = resolveRedirectUri($client, $options);
-                    $params = [
-                        'client_id' => $client['client_id'],
-                        'redirect_uri' => $redirectUri,
-                        'response_type' => 'code',
-                        'scope' => 'https://www.googleapis.com/auth/calendar.readonly',
-                        'access_type' => 'offline',
-                        'prompt' => 'consent',
-                    ];
-                    $authUrl = 'https://accounts.google.com/o/oauth2/auth?' . http_build_query($params);
-                }
-            } catch (Exception $ex) {
-                // Ignore credentials file read errors here
-            }
-
-            echo json_encode([
-                'status' => 'error',
-                'error' => 'auth_required',
-                'message' => 'Authentication expired or invalid: ' . $message,
-                'auth_url' => $authUrl
-            ], JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) . PHP_EOL;
-            exit(0);
-        }
-
-        fwrite(STDERR, "Authentication error: {$message}\n");
-        exit(1);
-    } else {
-        if (!empty($options['no_interactive'])) {
-            echo json_encode([
-                'status' => 'error',
-                'error' => 'api_error',
-                'message' => 'API error: ' . $message
-            ], JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) . PHP_EOL;
-            exit(0);
-        }
-
-        fwrite(STDERR, "Error: {$message}\n");
-        exit(1);
     }
+
+    if (!empty($options['no_interactive'])) {
+        $error = $isAuthError ? 'auth_required' : 'api_error';
+        $response = [
+            'status' => 'error',
+            'error' => $error,
+            'message' => ($isAuthError ? 'Authentication expired or invalid: ' : 'API error: ') . $message,
+        ];
+
+        if ($isAuthError) {
+            $response['auth_url'] = buildAuthUrlForOptions($options);
+        }
+
+        echo json_encode($response, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) . PHP_EOL;
+        exit(0);
+    }
+
+    fwrite(STDERR, 'Error: ' . $message . PHP_EOL);
+    exit(1);
 }
 
 function parseArguments(array $argv): array
 {
     $args = array_slice($argv, 1);
     $paths = [];
-
     $options = [
         'booking_report' => null,
         'credentials_file' => __DIR__ . '/credentials.json',
         'token_file' => __DIR__ . '/token.json',
         'calendar_ids' => [],
-        'include_cancelled' => false,
         'with_summary' => false,
         'output_file' => null,
         'help' => false,
@@ -143,8 +111,6 @@ function parseArguments(array $argv): array
     foreach ($args as $arg) {
         if ($arg === '--help' || $arg === '-h') {
             $options['help'] = true;
-        } elseif ($arg === '--include-cancelled') {
-            $options['include_cancelled'] = true;
         } elseif ($arg === '--with-summary') {
             $options['with_summary'] = true;
         } elseif ($arg === '--no-interactive') {
@@ -169,29 +135,20 @@ function parseArguments(array $argv): array
     }
 
     $options['booking_report'] = $paths[0] ?? null;
-
     return $options;
 }
 
 function printUsage(): void
 {
     fwrite(STDERR, "Usage:\n");
-    fwrite(STDERR, "  php scripts/compare-bookings-calendar.php <booking-report.csv> [options]\n\n");
-    fwrite(STDERR, "Options:\n");
-    fwrite(STDERR, "  --credentials=path.json  Google OAuth JSON file. Default: scripts/credentials.json\n");
-    fwrite(STDERR, "  --token=path.json        OAuth token cache. Default: scripts/token.json\n");
-    fwrite(STDERR, "  --calendar-id=id         Check one calendar. Use again for multiple calendars.\n");
-    fwrite(STDERR, "  --include-cancelled      Also check cancelled bookings. Default checks Confirmed and Amended only.\n");
-    fwrite(STDERR, "  --with-summary           Print counts along with missing booking objects.\n");
-    fwrite(STDERR, "  --output=path.json       Save JSON output to a file.\n");
-    fwrite(STDERR, "  --auth-only              Only complete/check Google OAuth login.\n\n");
-    fwrite(STDERR, "This script reads the CSV and checks live Google Calendar events using Google Calendar API.\n");
+    fwrite(STDERR, "  php compare-booking-agent-calendar.php <booking-agent-sheet.xlsx> [options]\n\n");
+    fwrite(STDERR, "Options are the same as compare-bookings-calendar.php, except this script reads XLSX agent sheets.\n");
 }
 
 function validateInput(array $options): void
 {
     if (!is_file($options['booking_report'])) {
-        throw new Exception("Booking report not found: {$options['booking_report']}");
+        throw new Exception("Booking agent sheet not found: {$options['booking_report']}");
     }
 
     if (!is_file($options['credentials_file'])) {
@@ -199,21 +156,20 @@ function validateInput(array $options): void
     }
 }
 
-function readBookingReport(string $reportPath, array $requiredColumns): array
+function readBookingAgentSheet(string $reportPath, array $requiredColumns): array
 {
     if (strtolower(pathinfo($reportPath, PATHINFO_EXTENSION)) === 'xlsx') {
-        return readBookingReportXlsx($reportPath, $requiredColumns);
+        return readBookingAgentSheetXlsx($reportPath, $requiredColumns);
     }
 
-    return readBookingReportCsv($reportPath, $requiredColumns);
+    return readBookingAgentSheetCsv($reportPath, $requiredColumns);
 }
 
-function readBookingReportCsv(string $reportPath, array $requiredColumns): array
+function readBookingAgentSheetCsv(string $reportPath, array $requiredColumns): array
 {
     $file = fopen($reportPath, 'rb');
     if ($file === false) {
-        fwrite(STDERR, "Unable to open booking report: {$reportPath}\n");
-        exit(1);
+        throw new Exception('Unable to open booking agent sheet: ' . $reportPath);
     }
 
     $headers = fgetcsv($file, 0, ',', '"', '\\');
@@ -222,28 +178,35 @@ function readBookingReportCsv(string $reportPath, array $requiredColumns): array
         return [];
     }
 
+    $headers = array_map('trim', $headers);
     validateColumns($headers, $requiredColumns);
 
     $bookings = [];
     while (($row = fgetcsv($file, 0, ',', '"', '\\')) !== false) {
-        if (isEmptyCsvRow($row)) {
+        if (isEmptyRow($row)) {
             continue;
         }
-
-        $bookings[] = array_combine($headers, array_pad($row, count($headers), ''));
+        $booking = array_combine($headers, array_pad($row, count($headers), ''));
+        $booking['Date'] = normalizeExcelDate((string) ($booking['Date'] ?? ''));
+        $bookings[] = $booking;
     }
 
     fclose($file);
     return $bookings;
 }
 
-function readBookingReportXlsx(string $reportPath, array $requiredColumns): array
+function readBookingAgentSheetXlsx(string $reportPath, array $requiredColumns): array
 {
     $archive = readXlsxArchive($reportPath);
     $sharedStrings = readSharedStrings($archive);
     $sheetPath = findFirstWorksheetPath($archive);
-    $rows = readWorksheetRows($archive[$sheetPath] ?? '', $sharedStrings);
+    $sheetXml = $archive[$sheetPath] ?? false;
 
+    if ($sheetXml === false) {
+        throw new Exception('Unable to read worksheet XML from XLSX file.');
+    }
+
+    $rows = readWorksheetRows($sheetXml, $sharedStrings);
     if ($rows === []) {
         return [];
     }
@@ -254,10 +217,13 @@ function readBookingReportXlsx(string $reportPath, array $requiredColumns): arra
     $bookings = [];
     for ($i = 1; $i < count($rows); $i++) {
         $row = array_pad($rows[$i], count($headers), '');
-        if (isEmptyCsvRow($row)) {
+        if (isEmptyRow($row)) {
             continue;
         }
-        $bookings[] = array_combine($headers, array_slice($row, 0, count($headers)));
+
+        $booking = array_combine($headers, array_slice($row, 0, count($headers)));
+        $booking['Date'] = normalizeExcelDate((string) ($booking['Date'] ?? ''));
+        $bookings[] = $booking;
     }
 
     return $bookings;
@@ -293,6 +259,7 @@ function readXlsxArchive(string $reportPath): array
         $commentLength = readUInt16($data, $position + 32);
         $localOffset = readUInt32($data, $position + 42);
         $name = substr($data, $position + 46, $nameLength);
+
         $localNameLength = readUInt16($data, $localOffset + 26);
         $localExtraLength = readUInt16($data, $localOffset + 28);
         $fileDataOffset = $localOffset + 30 + $localNameLength + $localExtraLength;
@@ -409,6 +376,7 @@ function readCellValue(SimpleXMLElement $cell, array $sharedStrings): string
     }
 
     $value = isset($children->v) ? (string) $children->v : '';
+
     if ($type === 's' && $value !== '') {
         return (string) ($sharedStrings[(int) $value] ?? '');
     }
@@ -436,24 +404,39 @@ function columnIndexFromCellRef(string $cellRef): int
     }
     return $index - 1;
 }
+
+function normalizeExcelDate(string $value): string
+{
+    $value = trim($value);
+    if ($value === '') {
+        return '';
+    }
+
+    if (is_numeric($value)) {
+        $seconds = ((float) $value - 25569) * 86400;
+        return gmdate('Y-m-d H:i:s', (int) round($seconds));
+    }
+
+    $timestamp = strtotime($value);
+    return $timestamp === false ? $value : date('Y-m-d H:i:s', $timestamp);
+}
+
 function validateColumns(array $headers, array $requiredColumns): void
 {
     $missingColumns = array_values(array_diff($requiredColumns, $headers));
-
     if ($missingColumns !== []) {
         fwrite(STDERR, 'Missing required columns: ' . implode(', ', $missingColumns) . PHP_EOL);
         exit(1);
     }
 }
 
-function isEmptyCsvRow(array $row): bool
+function isEmptyRow(array $row): bool
 {
     foreach ($row as $value) {
         if (trim((string) $value) !== '') {
             return false;
         }
     }
-
     return true;
 }
 
@@ -461,50 +444,26 @@ function getGoogleAccessToken(string $credentialsFile, string $tokenFile, array 
 {
     $credentials = readJsonFile($credentialsFile);
     $client = $credentials['installed'] ?? $credentials['web'] ?? null;
-
     if ($client === null) {
-        if (!empty($options['no_interactive'])) {
-            echo json_encode([
-                'status' => 'error',
-                'error' => 'invalid_credentials',
-                'message' => 'Invalid Google credentials JSON.'
-            ], JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) . PHP_EOL;
-            exit(0);
-        }
-        fwrite(STDERR, "Invalid Google credentials JSON.\n");
-        exit(1);
+        throw new Exception('Invalid Google credentials JSON.');
     }
 
     if (!empty($options['code'])) {
         $code = extractAuthorizationCode($options['code']);
         $redirectUri = resolveRedirectUri($client, $options);
-        try {
-            $token = googleTokenRequest($client, [
-                'code' => $code,
-                'client_id' => $client['client_id'],
-                'client_secret' => $client['client_secret'],
-                'redirect_uri' => $redirectUri,
-                'grant_type' => 'authorization_code',
-            ]);
-            $token['created_at'] = time();
-            saveJsonFile($tokenFile, $token);
-            return $token['access_token'];
-        } catch (Exception $e) {
-            if (!empty($options['no_interactive'])) {
-                echo json_encode([
-                    'status' => 'error',
-                    'error' => 'auth_required',
-                    'message' => 'Failed to exchange authorization code: ' . $e->getMessage()
-                ], JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) . PHP_EOL;
-                exit(0);
-            }
-            fwrite(STDERR, "Failed to exchange authorization code: " . $e->getMessage() . "\n");
-            exit(1);
-        }
+        $token = googleTokenRequest($client, [
+            'code' => $code,
+            'client_id' => $client['client_id'],
+            'client_secret' => $client['client_secret'],
+            'redirect_uri' => $redirectUri,
+            'grant_type' => 'authorization_code',
+        ]);
+        $token['created_at'] = time();
+        saveJsonFile($tokenFile, $token);
+        return $token['access_token'];
     }
 
     $token = is_file($tokenFile) ? readJsonFile($tokenFile) : null;
-
     if (is_array($token) && !empty($token['access_token']) && !isTokenExpired($token)) {
         return $token['access_token'];
     }
@@ -524,40 +483,19 @@ function getGoogleAccessToken(string $credentialsFile, string $tokenFile, array 
                 stripos($msg, 'revoked') !== false ||
                 stripos($msg, 'unauthorized') !== false
             );
-            if ($isAuthError) {
-                if (is_file($tokenFile)) {
-                    @unlink($tokenFile);
-                }
-                $token = null;
-            } else {
+            if (!$isAuthError) {
                 throw $e;
             }
+            @unlink($tokenFile);
         }
     }
 
     if (!empty($options['no_interactive'])) {
-        $redirectUri = resolveRedirectUri($client, $options);
-        $params = [
-            'client_id' => $client['client_id'],
-            'redirect_uri' => $redirectUri,
-            'response_type' => 'code',
-            'scope' => 'https://www.googleapis.com/auth/calendar.readonly',
-            'access_type' => 'offline',
-            'prompt' => 'consent',
-        ];
-        $authUrl = 'https://accounts.google.com/o/oauth2/auth?' . http_build_query($params);
-
-        echo json_encode([
-            'status' => 'error',
-            'error' => 'auth_required',
-            'auth_url' => $authUrl
-        ], JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) . PHP_EOL;
-        exit(0);
+        throw new Exception('unauthorized: Authentication required.', 401);
     }
 
     $token = createGoogleTokenFromLogin($client);
     saveJsonFile($tokenFile, $token);
-
     return $token['access_token'];
 }
 
@@ -578,18 +516,14 @@ function createGoogleTokenFromLogin(array $client): array
         'prompt' => 'consent',
     ];
 
-    $authUrl = 'https://accounts.google.com/o/oauth2/auth?' . http_build_query($params);
-
     fwrite(STDERR, "Open this link and login with the Google account that has calendar access:\n");
-    fwrite(STDERR, $authUrl . "\n\n");
+    fwrite(STDERR, 'https://accounts.google.com/o/oauth2/auth?' . http_build_query($params) . "\n\n");
     fwrite(STDERR, "After login, paste the full localhost URL or only the code here:\n");
 
     $input = trim((string) fgets(STDIN));
     $code = extractAuthorizationCode($input);
-
     if ($code === '') {
-        fwrite(STDERR, "Authorization code not found.\n");
-        exit(1);
+        throw new Exception('Authorization code not found.');
     }
 
     $token = googleTokenRequest($client, [
@@ -599,18 +533,36 @@ function createGoogleTokenFromLogin(array $client): array
         'redirect_uri' => $redirectUri,
         'grant_type' => 'authorization_code',
     ]);
-
     $token['created_at'] = time();
     return $token;
 }
 
+function buildAuthUrlForOptions(array $options): string
+{
+    try {
+        $credentials = readJsonFile($options['credentials_file']);
+        $client = $credentials['installed'] ?? $credentials['web'] ?? null;
+        if ($client === null) {
+            return '';
+        }
+
+        $params = [
+            'client_id' => $client['client_id'],
+            'redirect_uri' => resolveRedirectUri($client, $options),
+            'response_type' => 'code',
+            'scope' => 'https://www.googleapis.com/auth/calendar.readonly',
+            'access_type' => 'offline',
+            'prompt' => 'consent',
+        ];
+        return 'https://accounts.google.com/o/oauth2/auth?' . http_build_query($params);
+    } catch (Exception $e) {
+        return '';
+    }
+}
+
 function resolveRedirectUri(array $client, array $options): string
 {
-    if (!empty($options['redirect_uri'])) {
-        return $options['redirect_uri'];
-    }
-
-    return $client['redirect_uris'][0] ?? 'http://localhost';
+    return !empty($options['redirect_uri']) ? $options['redirect_uri'] : ($client['redirect_uris'][0] ?? 'http://localhost');
 }
 
 function extractAuthorizationCode(string $input): string
@@ -620,7 +572,6 @@ function extractAuthorizationCode(string $input): string
         parse_str($parts['query'] ?? '', $query);
         return (string) ($query['code'] ?? '');
     }
-
     return $input;
 }
 
@@ -632,76 +583,59 @@ function refreshGoogleToken(array $client, string $refreshToken): array
         'refresh_token' => $refreshToken,
         'grant_type' => 'refresh_token',
     ]);
-
     $token['refresh_token'] = $refreshToken;
     $token['created_at'] = time();
-
     return $token;
 }
 
 function googleTokenRequest(array $client, array $fields): array
 {
-    $tokenUri = $client['token_uri'] ?? 'https://oauth2.googleapis.com/token';
-    return httpRequest('POST', $tokenUri, [], $fields);
+    return httpRequest('POST', $client['token_uri'] ?? 'https://oauth2.googleapis.com/token', [], $fields);
 }
 
 function getCalendarIds(string $accessToken): array
 {
     $ids = [];
     $pageToken = null;
-
     do {
-        $params = [
-            'minAccessRole' => 'reader',
-            'maxResults' => 250,
-        ];
-
+        $params = ['minAccessRole' => 'reader', 'maxResults' => 250];
         if ($pageToken !== null) {
             $params['pageToken'] = $pageToken;
         }
-
         $response = googleGet($accessToken, 'https://www.googleapis.com/calendar/v3/users/me/calendarList', $params);
-
         foreach ($response['items'] ?? [] as $calendar) {
             $id = $calendar['id'] ?? '';
             if ($id !== '') {
                 $ids[] = $id;
             }
         }
-
         $pageToken = $response['nextPageToken'] ?? null;
     } while ($pageToken !== null);
 
     if ($ids === []) {
-        fwrite(STDERR, "No readable Google calendars found for this account.\n");
-        exit(1);
+        throw new Exception('No readable Google calendars found for this account.');
     }
-
     return $ids;
 }
 
-function readLiveCalendarBookingReferences(string $accessToken, array $calendarIds, array $bookings, bool $includeCancelled): array
+function readLiveCalendarAgentReferences(string $accessToken, array $calendarIds, array $bookings): array
 {
-    [$timeMin, $timeMax] = getBookingDateRange($bookings, $includeCancelled);
-    $references = [];
+    [$timeMin, $timeMax] = getBookingDateRange($bookings);
+    $expectedRefs = buildExpectedReferenceMap($bookings);
+    $found = [];
 
     foreach ($calendarIds as $calendarId) {
-        readReferencesFromCalendar($accessToken, $calendarId, $timeMin, $timeMax, $references);
+        readAgentReferencesFromCalendar($accessToken, $calendarId, $timeMin, $timeMax, $expectedRefs, $found);
     }
 
-    return $references;
+    return $found;
 }
 
-function getBookingDateRange(array $bookings, bool $includeCancelled): array
+function getBookingDateRange(array $bookings): array
 {
     $timestamps = [];
-
     foreach ($bookings as $booking) {
-        if (!shouldCheckBooking($booking, $includeCancelled)) {
-            continue;
-        }
-
-        $timestamp = strtotime($booking['Travel Date'] ?? '');
+        $timestamp = strtotime($booking['Date'] ?? '');
         if ($timestamp !== false) {
             $timestamps[] = $timestamp;
         }
@@ -711,16 +645,42 @@ function getBookingDateRange(array $bookings, bool $includeCancelled): array
         return [gmdate('c', strtotime('-1 year')), gmdate('c', strtotime('+1 year'))];
     }
 
-    $start = strtotime('-1 day', min($timestamps));
-    $end = strtotime('+1 day', max($timestamps));
-
-    return [gmdate('c', $start), gmdate('c', $end)];
+    return [gmdate('c', strtotime('-1 day', min($timestamps))), gmdate('c', strtotime('+1 day', max($timestamps)))];
 }
 
-function readReferencesFromCalendar(string $accessToken, string $calendarId, string $timeMin, string $timeMax, array &$references): void
+function buildExpectedReferenceMap(array $bookings): array
+{
+    $refs = [];
+    foreach ($bookings as $booking) {
+        foreach (getAgentBookingReferences($booking) as $ref) {
+            $refs[$ref] = true;
+        }
+    }
+    return $refs;
+}
+
+function getAgentBookingReferences(array $booking): array
+{
+    $refs = [];
+    $bookingRef = trim((string) ($booking['Booking Ref #'] ?? ''));
+    if ($bookingRef !== '') {
+        $refs[] = $bookingRef;
+    }
+
+    $supplierRef = str_replace(["\r\n", "\r"], "\n", (string) ($booking['Supplier Ref #'] ?? ''));
+    foreach (preg_split('/\n+/', $supplierRef) ?: [] as $line) {
+        $line = trim($line);
+        if ($line !== '') {
+            $refs[] = $line;
+        }
+    }
+
+    return array_values(array_unique($refs));
+}
+
+function readAgentReferencesFromCalendar(string $accessToken, string $calendarId, string $timeMin, string $timeMax, array $expectedRefs, array &$found): void
 {
     $pageToken = null;
-
     do {
         $params = [
             'timeMin' => $timeMin,
@@ -729,178 +689,125 @@ function readReferencesFromCalendar(string $accessToken, string $calendarId, str
             'showDeleted' => 'false',
             'maxResults' => 2500,
         ];
-
         if ($pageToken !== null) {
             $params['pageToken'] = $pageToken;
         }
 
         $url = 'https://www.googleapis.com/calendar/v3/calendars/' . rawurlencode($calendarId) . '/events';
         $response = googleGet($accessToken, $url, $params);
-
         foreach ($response['items'] ?? [] as $event) {
-            addBookingReferences($event['summary'] ?? '', $references);
-            addBookingReferences($event['description'] ?? '', $references);
-            addBookingReferences($event['location'] ?? '', $references);
+            $text = implode("\n", [$event['summary'] ?? '', $event['description'] ?? '', $event['location'] ?? '']);
+            foreach ($expectedRefs as $ref => $_) {
+                if (!isset($found[$ref]) && stripos($text, $ref) !== false) {
+                    $found[$ref] = true;
+                }
+            }
         }
 
         $pageToken = $response['nextPageToken'] ?? null;
     } while ($pageToken !== null);
 }
 
-function addBookingReferences(string $text, array &$references): void
+function findMissingAgentBookings(array $bookings, array $calendarReferences, int $calendarCount): array
 {
-    if (preg_match_all('/\bBR-\d+\b/', $text, $matches)) {
-        foreach ($matches[0] as $reference) {
-            $references[$reference] = true;
-        }
-    }
-}
-
-function findMissingBookings(array $bookings, array $calendarReferences, bool $includeCancelled, int $calendarCount): array
-{
-    $total = count($bookings);
-    $checked = 0;
-    $skipped = 0;
-    $statusSkipped = 0;
     $allBookings = [];
     $checkedBookings = [];
     $alreadyExists = [];
     $missing = [];
-    $cancelled = [];
 
     foreach ($bookings as $booking) {
-        $bookingObject = buildMissingBookingObject($booking);
-        $bookingObject['CSV Status'] = $booking['Status'] ?? '';
-
-        $status = strtolower(trim($booking['Status'] ?? ''));
-        $isCancelled = str_contains($status, 'cancel') || str_contains($status, 'canceled');
-
-        if ($isCancelled) {
-            $statusSkipped++;
-            $bookingObject['Calendar Check'] = 'Not checked';
-            $bookingObject['Calendar Result'] = 'Cancelled';
-            $allBookings[] = $bookingObject;
-            $cancelled[] = $bookingObject;
-            continue;
-        }
-
-        if (!shouldCheckBooking($booking, $includeCancelled)) {
-            $statusSkipped++;
-            $bookingObject['Calendar Check'] = 'Not checked';
-            $bookingObject['Calendar Result'] = 'Skipped by CSV status';
-            $allBookings[] = $bookingObject;
-            continue;
-        }
-
-        $checked++;
+        $bookingObject = buildAgentBookingObject($booking);
+        $bookingObject['CSV Status'] = '';
         $bookingObject['Calendar Check'] = 'Checked';
 
-        if (bookingExistsInCalendar($booking, $calendarReferences)) {
-            $skipped++;
+        if (agentBookingExistsInCalendar($booking, $calendarReferences)) {
             $bookingObject['Calendar Result'] = 'Already on calendar';
-            $allBookings[] = $bookingObject;
-            $checkedBookings[] = $bookingObject;
             $alreadyExists[] = $bookingObject;
-            continue;
+        } else {
+            $bookingObject['Calendar Result'] = 'Missing from calendar';
+            $missing[] = $bookingObject;
         }
 
-        $bookingObject['Calendar Result'] = 'Missing from calendar';
         $allBookings[] = $bookingObject;
         $checkedBookings[] = $bookingObject;
-        $missing[] = $bookingObject;
     }
 
     return [
         'calendar_count_checked' => $calendarCount,
-        'total_bookings_checked' => $total,
-        'bookings_compared' => $checked,
-        'status_skipped' => $statusSkipped,
-        'already_exists_skip' => $skipped,
+        'total_bookings_checked' => count($bookings),
+        'bookings_compared' => count($bookings),
+        'status_skipped' => 0,
+        'already_exists_skip' => count($alreadyExists),
         'missing_printed' => count($missing),
         'all_bookings' => $allBookings,
         'checked_bookings' => $checkedBookings,
         'already_exists' => $alreadyExists,
         'missing' => $missing,
-        'cancelled' => $cancelled,
+        'cancelled' => [],
     ];
 }
 
-function shouldCheckBooking(array $booking, bool $includeCancelled): bool
+function agentBookingExistsInCalendar(array $booking, array $calendarReferences): bool
 {
-    return true;
+    foreach (getAgentBookingReferences($booking) as $ref) {
+        if (isset($calendarReferences[$ref])) {
+            return true;
+        }
+    }
+    return false;
 }
 
-function bookingExistsInCalendar(array $booking, array $calendarReferences): bool
+function buildAgentBookingObject(array $booking): array
 {
-    $reference = $booking['Booking Reference'] ?? '';
-    return $reference !== '' && isset($calendarReferences[$reference]);
-}
-
-function buildMissingBookingObject(array $booking): array
-{
-    $startDate = buildStartDate($booking['Travel Date'] ?? '', $booking['Tour Grade Code'] ?? '');
+    $startDate = $booking['Date'] ?? '';
+    $supplierRefs = implode(', ', array_slice(getAgentBookingReferences($booking), 1));
 
     return [
         'Action' => 'Booking',
         'Amount' => $booking['Net Price'] ?? '',
-        'City' => detectCity($booking['Product Name'] ?? ''),
-        'Email' => '',
+        'City' => detectCity(($booking['Product'] ?? '') . ' ' . ($booking['Option'] ?? '')),
+        'Email' => $booking['Email'] ?? '',
         'End Date' => buildEndDate($startDate),
-        'Guests' => (int) ($booking['Number of Passengers'] ?? 0),
-        'Name' => $booking['Lead traveler Name'] ?? '',
-        'Phone' => normalizePhone($booking['Lead traveler Contact Info'] ?? ''),
-        'Ref' => $booking['Booking Reference'] ?? '',
-        'Source' => normalizeSource($booking['Booking Source'] ?? ''),
+        'Guests' => countAgentGuests($booking),
+        'Name' => trim(($booking["Traveler's First Name"] ?? '') . ' ' . ($booking["Traveler's Last Name"] ?? '')),
+        'Phone' => normalizePhone($booking['Phone'] ?? ''),
+        'Ref' => $booking['Booking Ref #'] ?? '',
+        'Source' => 'GetYourGuide',
         'Start Date' => $startDate,
-        'Tour' => $booking['Product Name'] ?? '',
+        'Tour' => $booking['Product'] ?? '',
+        'Option' => $booking['Option'] ?? '',
+        'Supplier Ref' => $supplierRefs,
     ];
 }
 
-function buildStartDate(string $travelDate, string $tourGradeCode): string
+function countAgentGuests(array $booking): int
 {
-    $time = '';
-
-    if (preg_match('/~(\d{1,2}:\d{2})/', $tourGradeCode, $matches)) {
-        $time = $matches[1] . ':00';
+    $columns = ['Adult', 'Senior', 'Student (with ID)', 'EU Citizens (with ID)', 'Student EU Citizens (with ID)', 'Military (with ID)', 'Youth', 'Child', 'Infant', 'Group'];
+    $guests = 0;
+    foreach ($columns as $column) {
+        $value = trim((string) ($booking[$column] ?? ''));
+        if ($value !== '' && is_numeric($value)) {
+            $guests += (int) $value;
+        }
     }
-
-    $timestamp = strtotime(trim($travelDate . ' ' . $time));
-    if ($timestamp === false) {
-        return trim($travelDate . ' ' . $time);
-    }
-
-    return date('Y-m-d H:i:s', $timestamp);
+    return $guests;
 }
 
 function buildEndDate(string $startDate): string
 {
     $timestamp = strtotime($startDate);
-    if ($timestamp === false) {
-        return '';
-    }
-
-    return date('Y-m-d H:i:s', strtotime('+1 hour', $timestamp));
+    return $timestamp === false ? '' : date('Y-m-d H:i:s', strtotime('+1 hour', $timestamp));
 }
 
 function detectCity(string $tourName): string
 {
-    $cities = [
-        'Amsterdam', 'Athens', 'Barcelona', 'Berlin', 'Budapest', 'Hamburg',
-        'Madrid', 'Malaga', 'Nice', 'Paris', 'Stockholm', 'Warsaw',
-    ];
-
+    $cities = ['Amsterdam', 'Athens', 'Barcelona', 'Berlin', 'Budapest', 'Hamburg', 'Madrid', 'Malaga', 'Nice', 'Paris', 'Stockholm', 'Warsaw'];
     foreach ($cities as $city) {
         if (stripos($tourName, $city) !== false) {
             return $city;
         }
     }
-
     return '';
-}
-
-function normalizeSource(string $source): string
-{
-    return 'Viator.com';
 }
 
 function normalizePhone(string $phone): string
@@ -915,10 +822,7 @@ function normalizePhone(string $phone): string
     if ($phone === '') {
         return '';
     }
-    if ($phone[0] !== '+') {
-        return '+' . $phone;
-    }
-    return $phone;
+    return $phone[0] === '+' ? $phone : '+' . $phone;
 }
 
 function googleGet(string $accessToken, string $url, array $params = []): array
@@ -926,7 +830,6 @@ function googleGet(string $accessToken, string $url, array $params = []): array
     if ($params !== []) {
         $url .= '?' . http_build_query($params);
     }
-
     return httpRequest('GET', $url, ['Authorization: Bearer ' . $accessToken]);
 }
 
@@ -963,7 +866,6 @@ function curlHttpRequest(string $method, string $url, array $headers, ?array $fi
     }
 
     curl_setopt($curl, CURLOPT_HTTPHEADER, $headers);
-
     $body = curl_exec($curl);
     if ($body === false) {
         throw new Exception('HTTP request failed: ' . curl_error($curl));
@@ -971,14 +873,12 @@ function curlHttpRequest(string $method, string $url, array $headers, ?array $fi
 
     $status = (int) curl_getinfo($curl, CURLINFO_RESPONSE_CODE);
     curl_close($curl);
-
     return ['status' => $status, 'body' => $body];
 }
 
 function streamHttpRequest(string $method, string $url, array $headers, ?array $fields): array
 {
     $content = $fields === null ? null : http_build_query($fields);
-
     if ($content !== null) {
         $headers[] = 'Content-Type: application/x-www-form-urlencoded';
     }
@@ -1014,7 +914,6 @@ function readJsonFile(string $path): array
     if (!is_array($data)) {
         throw new Exception("Invalid JSON file: {$path}");
     }
-
     return $data;
 }
 
